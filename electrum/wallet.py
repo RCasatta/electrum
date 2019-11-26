@@ -1659,7 +1659,8 @@ class Abstract_Wallet(AddressSynchronizer):
         self._update_password_for_keystore(old_pw, new_pw)
         encrypt_keystore = self.can_have_keystore_encryption()
         self.storage.set_keystore_encryption(bool(new_pw) and encrypt_keystore)
-        self.storage.write()
+        # rewrite the whole file after password upddate
+        self.storage._write()
 
     def sign_message(self, address, message, password):
         index = self.get_address_index(address)
