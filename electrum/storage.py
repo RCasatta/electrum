@@ -37,6 +37,9 @@ from .plugin import run_hook, plugin_loaders
 from .json_db import JsonDB
 from .logging import Logger
 
+import hmac
+from .crypto import aes_encrypt_with_iv, aes_decrypt_with_iv
+
 
 def get_derivation_used_for_hw_device_encryption():
     return ("m"
@@ -126,6 +129,10 @@ class WalletStorage(Logger):
             return
         s = ''.join([',\n' + x for x in self.db.pending_changes])
         with open(self.path, "a", encoding='utf-8') as f:
+            if self.pubkey:
+                s = self.encrypt_for_append(s)
+                pos = f.tell()
+                f.seek(pos-16-32)
             f.write(s)
             f.flush()
             os.fsync(f.fileno())
@@ -139,7 +146,7 @@ class WalletStorage(Logger):
             return
         self.db.commit()
         self.db.pending_changes = []
-        s = self.encrypt_before_writing(self.db.dump())
+        s = self.encrypt_for_write(self.db.dump())
         temp_path = "%s.tmp.%s" % (self.path, os.getpid())
         with open(temp_path, "w", encoding='utf-8') as f:
             f.write(s)
@@ -222,8 +229,23 @@ class WalletStorage(Logger):
     def decrypt(self, password):
         ec_key = self.get_eckey_from_password(password)
         if self.raw:
+            encrypted = base64.b64decode(self.raw)
             enc_magic = self._get_encryption_magic()
-            s = zlib.decompress(ec_key.decrypt_message(self.raw, enc_magic))
+            self.key_e, self.key_m, iv, ciphertext, mac = ec_key.decode_encrypted(encrypted, enc_magic)
+            self.mac = hmac.new(self.key_m, encrypted[:-32-16], hashlib.sha256)
+            m2 = self.mac.copy()
+            m2.update(ciphertext[-16:])
+            if m2.digest() != mac:
+                #print('mac error')
+                raise InvalidPassword()
+            last_block = ciphertext[-16:]
+            s = aes_decrypt_with_iv(self.key_e, iv, ciphertext)
+            iv2 = iv if len(ciphertext)==16 else ciphertext[-32:-16]
+            last_blob = aes_decrypt_with_iv(self.key_e, iv2, last_block)
+            assert last_block == aes_encrypt_with_iv(self.key_e, iv2, last_blob)
+            #assert last_blob
+            self.iv = iv2
+            self.last_blob = last_blob
         else:
             s = None
         self.pubkey = ec_key.get_public_key_hex()
@@ -232,14 +254,39 @@ class WalletStorage(Logger):
         self._write()
         self.load_plugins()
 
-    def encrypt_before_writing(self, plaintext: str) -> str:
+    def encrypt_for_write(self, plaintext: str) -> str:
         s = plaintext
         if self.pubkey:
             s = bytes(s, 'utf8')
-            c = zlib.compress(s)
+            #c = zlib.compress(s)
             enc_magic = self._get_encryption_magic()
             public_key = ecc.ECPubkey(bfh(self.pubkey))
-            s = public_key.encrypt_message(c, enc_magic)
+            #print('encrypt_for_write', s)
+            encrypted, ciphertext, key_e, key_m, iv, mac = public_key.encrypt_message(s, enc_magic)
+            s = base64.b64encode(encrypted + mac)
+            s = s.decode('utf8')
+            # save mac, last_blob, key_e, key_m, and iv, for subsequent encr
+            self.key_e = key_e
+            self.key_m = key_m
+            self.iv = ciphertext[-32:-16]
+            self.last_blob = aes_decrypt_with_iv(self.key_e, self.iv, ciphertext[-16:])
+            self.mac = hmac.new(self.key_m, encrypted[:-32-16], hashlib.sha256)
+        return s
+
+    def encrypt_for_append(self, plaintext: str) -> str:
+        s = plaintext
+        if self.pubkey:
+            s = bytes(s, 'utf8')
+            enc_magic = self._get_encryption_magic()
+            ciphertext = aes_encrypt_with_iv(self.key_e, self.iv, self.last_blob + s)
+            self.iv = self.iv if len(ciphertext)==16 else ciphertext[-32:-16]
+            self.last_blob = aes_decrypt_with_iv(self.key_e, self.iv, ciphertext[-16:])
+            # self.mac does not include the last block
+            self.mac.update(ciphertext[0:-16])
+            m2 = self.mac.copy()
+            m2.update(ciphertext[-16:])
+            mac = m2.digest()
+            s = base64.b64encode(ciphertext + mac)
             s = s.decode('utf8')
         return s
 

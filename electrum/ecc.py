@@ -300,7 +300,7 @@ class ECPubkey(object):
         encrypted = magic + ephemeral_pubkey + ciphertext
         mac = hmac_oneshot(key_m, encrypted, hashlib.sha256)
 
-        return base64.b64encode(encrypted + mac)
+        return encrypted, ciphertext, key_e, key_m, iv, mac
 
     @classmethod
     def order(cls):
@@ -445,8 +445,7 @@ class ECPrivkey(ECPubkey):
         sig65, recid = bruteforce_recid(sig_string)
         return sig65
 
-    def decrypt_message(self, encrypted: Union[str, bytes], magic: bytes=b'BIE1') -> bytes:
-        encrypted = base64.b64decode(encrypted)  # type: bytes
+    def decode_encrypted(self, encrypted: bytes, magic: bytes=b'BIE1') -> bytes:
         if len(encrypted) < 85:
             raise Exception('invalid ciphertext: length')
         magic_found = encrypted[:4]
@@ -465,6 +464,11 @@ class ECPrivkey(ECPubkey):
         ecdh_key = (ephemeral_pubkey * self.secret_scalar).get_public_key_bytes(compressed=True)
         key = hashlib.sha512(ecdh_key).digest()
         iv, key_e, key_m = key[0:16], key[16:32], key[32:]
+        return key_e, key_m, iv, ciphertext, mac
+
+    def decrypt_message(self, encrypted: Union[str, bytes], magic: bytes=b'BIE1') -> bytes:
+        encrypted = base64.b64decode(encrypted)  # type: bytes
+        key_e, key_m, iv, ciphertext, mac = self.decode_encrypted(encrypted, magic)
         if mac != hmac_oneshot(key_m, encrypted[:-32], hashlib.sha256):
             raise InvalidPassword()
         return aes_decrypt_with_iv(key_e, iv, ciphertext)
